@@ -1,0 +1,77 @@
+==============================================================================
+                 PRIVACY FIRST TOOL - SETUP GUIDE
+==============================================================================
+
+Our official page: https://slothytech.com/PrivacyFirst/
+You can also enter your email on the PrivacyFirst page to receive the latest version.
+
+Video Guide(Few things have changed with the latest udpates): https://www.youtube.com/watch?v=snbRwCClcV4
+
+If you need any help you can always contact me at: support@slothytech.com
+
+==============================================================================
+                       TAKE 2 MINUTES AND READ BELOW PLEASE.
+	I've made a few notes on the functions that need some manual input or are more likely to cause issues.
+	
+==============================================================================
+
+******** CREATE SYSTEM RESTORE POINT (HIGHLY RECOMMENDED) ********
+------------------------------------------------------------------------------
+
+If you are not tech-savvy, create a restore point just in case anything breaks.
+You can easily restore instead of trying to troubleshoot a simple issue for hours...
+or days....
+
+
+******** SETUP VPN (OpenVPN with NordVPN) ********
+------------------------------------------------------------------------------
+
+THIS IS VERY IMPORTANT.
+Nothing you do matters if you don't setup OpenVPN with NordVPN. The privacy tool just won't work, because you will get linked by your network adapter.
+
+We don't use the VPN just for the IP address, the main reason is that we utilize its virtual adapter and customize it via a config to privacy tool the network part.
+
+IF FOR WHATEVER REASON THIS STEP DON'T WORK THEN DO THE FOLLOWING:
+- Run the Setup VPN option on PrivacyFirst, choose the country and server, and it will create a config.
+- Download and install this version of OpenVPN: https://openvpn.net/connect-docs/connect-for-windows.html
+- Then go to the PrivacyFirst Final folder -> Configs, and either double click on the config or drag and drop it into the OpenVPN window,
+or run OpenVPN connect, click the + icon, click the file tab, choose browse, and locate the file. 
+- You should be good to go.
+
+Official guide how to import a profile on OpenVPN connect: https://openvpn.net/connect-docs/import-profile.html
+
+To find your Service Account Details to enter on OpenVPN do the following:
+- Go to NordVPN official website: https://go.nordvpn.net/<affiliate-link>
+- Login with your account and make sure you have an active premium subscription.
+- Then visit this page: https://my.nordaccount.com/dashboard/nordvpn/manual-configuration/service-credentials/
+- Click on Service Credentials
+- It will ask you to verify your email, do that and then you will be able to see the Username and Password.
+- Copy those and put them on OpenVPN and click on Remember, so you don't have to do this every time.
+
+
+------------------------------------------------------------------------------
+
+******** CHANGE MAC ADDRESS ********
+------------------------------------------------------------------------------
+
+Will work for 99% of Ethernet adapters.
+Wi-Fi really depends. If you get errors on Wi-Fi, then switch to Ethernet and change the MAC address of it.
+
+******** CHANGE MONITOR HWID ********
+------------------------------------------------------------------------------
+
+Should work without issues. If you have multiple monitors, don't change everything at one time.
+Change one, restart, see if everything is good, then do the other.
+
+******** HIDE PERIPHERAL SERIAL NUMBERS ********
+------------------------------------------------------------------------------
+In most games, this is not needed.
+Again, don't do every single device or you will crash your PC.
+Find the main ones: Keyboard, Mouse, Headphones, Controller and hide them.
+------------------------------------------------------------------------------
+
+******** Important to know ********
+
+One very important thing to note is that a lot of games have started linking to bans via Discord.
+So we've added an Unlink Discord function.
+Use it to be safe. If you need Discord, make sure to uninstall it and use a new account.
