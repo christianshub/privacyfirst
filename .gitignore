@@ -1,0 +1,50 @@
+# Build outputs
+x64/
+core/PrivacyCore/x64/
+*.exe
+*.dll
+*.pdb
+*.exp
+*.lib
+*.obj
+*.iobj
+*.ipdb
+
+# But include the final release binaries in x64/Release for easy download
+!x64/Release/*.exe
+!x64/Release/*.dll
+!x64/Release/*.json
+!x64/Release/*.runtimeconfig.json
+
+# Visual Studio
+.vs/
+*.user
+*.suo
+*.sln.docstates
+
+# Build intermediate files
+*.tlog
+*.recipe
+*.lastbuildstate
+*.log
+
+# Temporary files
+*.tmp
+*.temp
+~$*
+
+# IDE
+.vscode/
+.idea/
+
+# OS
+.DS_Store
+Thumbs.db
+
+# .NET
+bin/
+obj/
+*.cache
+
+# Test output
+test_results.json
