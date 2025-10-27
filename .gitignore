@@ -48,3 +48,4 @@ obj/
 
 # Test output
 test_results.json
+callback_results/

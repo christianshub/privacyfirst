@@ -1,135 +1,320 @@
-# Automated test with HTTP callback
-# VM downloads from GitHub, runs test, posts results back
+﻿# PrivacyFirst automated testing with HTTP callback
+# Starts a lightweight callback server, serves a VM script, and captures posted test results
 
 param(
-    [string]$CallbackPort = 9000,
+    [int]$CallbackPort = 9000,
     [string]$GitHubUser = "christianshub",
-    [string]$RepoName = "privacyfirst"
+    [string]$RepoName = "privacyfirst",
+    [string]$Branch = "main",
+    [string]$ResultsDirectory = ".\callback_results"
 )
 
-# Get local IP
-$localIP = (Get-NetIPAddress -AddressFamily IPv4 | Where-Object {$_.IPAddress -like "192.168.*"} | Select-Object -First 1).IPAddress
+Set-StrictMode -Version Latest
+$ErrorActionPreference = "Stop"
 
-Write-Host "=== PrivacyFirst Auto-Test with Callback ===" -ForegroundColor Cyan
-Write-Host "Callback server: http://${localIP}:${CallbackPort}" -ForegroundColor Gray
-Write-Host ""
+function Get-LocalLanIp {
+    $ip = Get-NetIPAddress -AddressFamily IPv4 |
+        Where-Object { $_.IPAddress -like "192.168.*" -or $_.IPAddress -like "10.*" -or $_.IPAddress -like "172.16.*" } |
+        Select-Object -First 1 -ExpandProperty IPAddress
 
-# Start HTTP listener for callback
-$listener = New-Object System.Net.HttpListener
-$listener.Prefixes.Add("http://+:${CallbackPort}/")
-$listener.Start()
+    if (-not $ip) {
+        throw "Unable to determine LAN IPv4 address. Please specify manually or ensure you are connected to the VM network."
+    }
 
-Write-Host "[1/3] HTTP callback server started on port $CallbackPort" -ForegroundColor Green
+    return $ip
+}
 
-# Generate the VM script with callback
-$vmScript = @"
-# Auto-test script for VM
-`$dest = 'C:\PrivacyFirstTest'
-`$githubUrl = 'https://raw.githubusercontent.com/$GitHubUser/$RepoName/main/x64/Release'
-`$callbackUrl = 'http://${localIP}:${CallbackPort}/result'
-
-`$report = "=== PrivacyFirst Test Report ===``n"
-`$report += "Timestamp: `$(Get-Date -Format 'yyyy-MM-dd HH:mm:ss')``n"
-`$report += "Hostname: `$env:COMPUTERNAME``n``n"
-
-# Download files
-`$report += "Downloading from GitHub...``n"
-if (!(Test-Path `$dest)) { mkdir `$dest | Out-Null }
-
-`$files = @('PrivacyFirst.exe','PrivacyFirst.dll','PrivacyCore.dll','PrivacyFirst.deps.json','PrivacyFirst.runtimeconfig.json')
-`$downloaded = 0
-foreach (`$f in `$files) {
-    try {
-        Invoke-WebRequest "`$githubUrl/`$f" -OutFile "`$dest\`$f" -UseBasicParsing
-        `$report += "  OK: `$f``n"
-        `$downloaded++
-    } catch {
-        `$report += "  FAIL: `$f``n"
+function Ensure-Directory($path) {
+    if (-not (Test-Path -LiteralPath $path)) {
+        New-Item -ItemType Directory -Path $path | Out-Null
     }
 }
 
-`$report += "``nDownloaded: `$downloaded/`$(`$files.Count) files``n``n"
+function Get-SafeFileName {
+    param([string]$Name)
+    if ([string]::IsNullOrWhiteSpace($Name)) {
+        return "unknown"
+    }
 
-# Capture system state
-`$report += "System State:``n"
-try {
-    `$machineGuid = (Get-ItemProperty 'HKLM:\SOFTWARE\Microsoft\Cryptography').MachineGuid
-    `$hwGuid = (Get-ItemProperty 'HKLM:\SYSTEM\CurrentControlSet\Control\IDConfigDB\Hardware Profiles\0001').HwProfileGuid
-    `$report += "  MachineGuid: `$machineGuid``n"
-    `$report += "  HwProfileGuid: `$hwGuid``n"
-} catch {
-    `$report += "  ERROR capturing state``n"
+    return ($Name -replace '[^a-zA-Z0-9\.\-_]', "_")
 }
 
-`$report += "``nFiles location: `$dest``n"
-`$report += "``nTest complete! Run PrivacyFirst.exe to test manually.``n"
+$localIP = Get-LocalLanIp
+Ensure-Directory -path $ResultsDirectory
 
-# Save locally
-`$report | Out-File "`$dest\test_report.txt" -Encoding UTF8
+Write-Host "=== PrivacyFirst Auto-Test with Callback ===" -ForegroundColor Cyan
+Write-Host "Local callback URL: http://${localIP}:${CallbackPort}" -ForegroundColor Gray
+Write-Host "Results directory:  $ResultsDirectory" -ForegroundColor Gray
+Write-Host ""
 
-# Send callback
+# Prepare HTTP listener
+$listener = [System.Net.HttpListener]::new()
+$listener.Prefixes.Add("http://+:${CallbackPort}/")
+
 try {
-    Invoke-WebRequest -Uri `$callbackUrl -Method POST -Body `$report -UseBasicParsing | Out-Null
-    Write-Host "Results sent to callback server" -ForegroundColor Green
-} catch {
-    Write-Host "Failed to send callback (server might not be running)" -ForegroundColor Yellow
+    $listener.Start()
+}
+catch {
+    throw "Failed to start HTTP listener on port $CallbackPort. Run PowerShell as Administrator or free the port. Error: $($_.Exception.Message)"
 }
 
-Write-Host `$report
+Write-Host "[1/4] HTTP callback server started on port $CallbackPort" -ForegroundColor Green
+# Generate the VM execution script
+$vmScript = @"
+# Auto-test script downloaded from the developer machine
+`$ErrorActionPreference = 'Continue'
+
+`$dest = 'C:\PrivacyFirstTest'
+`$repoUser = '$GitHubUser'
+`$repoName = '$RepoName'
+`$repoBranch = '$Branch'
+`$downloadBase = 'https://raw.githubusercontent.com/$GitHubUser/$RepoName/$Branch/x64/Release'
+`$callbackUrl = 'http://${localIP}:${CallbackPort}/result'
+
+Write-Host '=== PrivacyFirst VM Auto-Test ===' -ForegroundColor Cyan
+Write-Host "Repository: `$repoUser/`$repoName (`$repoBranch)" -ForegroundColor Gray
+Write-Host "Artifact source: `$downloadBase" -ForegroundColor Gray
+
+if (-not (Test-Path `$dest)) {
+    New-Item -ItemType Directory -Path `$dest -Force | Out-Null
+    Write-Host "Created directory `$dest" -ForegroundColor Yellow
+}
+
+`$files = @('PrivacyFirst.exe','PrivacyFirst.dll','PrivacyCore.dll','PrivacyFirst.deps.json','PrivacyFirst.runtimeconfig.json')
+`$downloads = @()
+
+Write-Host "`n[1/4] Downloading artifacts..." -ForegroundColor Yellow
+foreach (`$file in `$files) {
+    `$entry = [ordered]@{
+        file = `$file
+        success = `$false
+        error = `$null
+    }
+
+    try {
+        Invoke-WebRequest -Uri "`$downloadBase/`$file" -OutFile (Join-Path `$dest `$file) -UseBasicParsing -ErrorAction Stop
+        `$entry.success = `$true
+        Write-Host "  [OK] `$file" -ForegroundColor Green
+    }
+    catch {
+        `$entry.error = `$_.Exception.Message
+        Write-Host "  [FAIL] `$file - `$(`$entry.error)" -ForegroundColor Red
+    }
+
+    `$downloads += `$entry
+}
+
+function Get-RegistryValue {
+    param(
+        [string]`$Path,
+        [string]`$Name
+    )
+
+    try {
+        (Get-ItemProperty -Path "Registry::`$Path" -Name `$Name -ErrorAction Stop).`$Name
+    }
+    catch {
+        `$null
+    }
+}
+
+Write-Host "`n[2/4] Capturing registry state..." -ForegroundColor Yellow
+`$initialState = [ordered]@{
+    MachineGuid = Get-RegistryValue "HKEY_LOCAL_MACHINE\SOFTWARE\Microsoft\Cryptography" "MachineGuid"
+    HwProfileGuid = Get-RegistryValue "HKEY_LOCAL_MACHINE\SYSTEM\CurrentControlSet\Control\IDConfigDB\Hardware Profiles\0001" "HwProfileGuid"
+}
+
+Write-Host "  MachineGuid: `$(`$initialState.MachineGuid)" -ForegroundColor Gray
+Write-Host "  HwProfileGuid: `$(`$initialState.HwProfileGuid)" -ForegroundColor Gray
+
+Write-Host "`n[3/4] Building test results..." -ForegroundColor Yellow
+`$tests = @()
+
+`$tests += [ordered]@{
+    name = 'Artifact Download'
+    success = ((`$downloads | Where-Object { -not `$_.success }).Count -eq 0)
+    details = `$downloads
+}
+
+`$tests += [ordered]@{
+    name = 'Registry State Captured'
+    success = (-not [string]::IsNullOrEmpty(`$initialState.MachineGuid))
+    details = `$initialState
+}
+
+`$resultsObject = [ordered]@{
+    timestamp = Get-Date -Format 'yyyy-MM-dd HH:mm:ss'
+    hostname = `$env:COMPUTERNAME
+    repo = "`$repoUser/`$repoName"
+    branch = `$repoBranch
+    downloadPath = `$dest
+    downloads = `$downloads
+    tests = `$tests
+    initialState = `$initialState
+}
+
+`$reportBuilder = New-Object System.Text.StringBuilder
+[void]`$reportBuilder.AppendLine('=== PrivacyFirst Automated Test Report ===')
+[void]`$reportBuilder.AppendLine("Timestamp: `$(`$resultsObject.timestamp)")
+[void]`$reportBuilder.AppendLine("Hostname: `$(`$resultsObject.hostname)")
+[void]`$reportBuilder.AppendLine("Repository: `$repoUser/`$repoName (`$repoBranch)")
+[void]`$reportBuilder.AppendLine('')
+[void]`$reportBuilder.AppendLine('Downloads:')
+foreach (`$download in `$downloads) {
+    `$status = if (`$download.success) { 'OK' } else { 'FAIL' }
+    [void]`$reportBuilder.AppendLine("  [`$status] `$(`$download.file)")
+    if (-not `$download.success -and `$download.error) {
+        [void]`$reportBuilder.AppendLine("         -> `$(`$download.error)")
+    }
+}
+[void]`$reportBuilder.AppendLine('')
+[void]`$reportBuilder.AppendLine('Initial Registry State:')
+[void]`$reportBuilder.AppendLine("  MachineGuid: `$(`$initialState.MachineGuid)")
+[void]`$reportBuilder.AppendLine("  HwProfileGuid: `$(`$initialState.HwProfileGuid)")
+[void]`$reportBuilder.AppendLine('')
+[void]`$reportBuilder.AppendLine('Tests:')
+foreach (`$test in `$tests) {
+    `$status = if (`$test.success) { 'PASS' } else { 'FAIL' }
+    [void]`$reportBuilder.AppendLine("  [`$status] `$(`$test.name)")
+}
+
+`$reportText = `$reportBuilder.ToString()
+`$reportPath = Join-Path `$dest 'test_report.txt'
+`$jsonPath = Join-Path `$dest 'test_results.json'
+
+Write-Host "`n[4/4] Saving results..." -ForegroundColor Yellow
+`$reportText | Out-File -FilePath `$reportPath -Encoding UTF8
+`$resultsObject | ConvertTo-Json -Depth 10 | Out-File -FilePath `$jsonPath -Encoding UTF8
+
+Write-Host "`n=== Test Summary ===" -ForegroundColor Cyan
+Write-Host `$reportText
+Write-Host "Report saved to: `$reportPath" -ForegroundColor Gray
+Write-Host "JSON results saved to: `$jsonPath" -ForegroundColor Gray
+
+Write-Host "`nSending callback to `$callbackUrl..." -ForegroundColor Yellow
+`$payload = @{
+    report = `$reportText
+    results = `$resultsObject
+} | ConvertTo-Json -Depth 10
+
+try {
+    Invoke-WebRequest -Uri `$callbackUrl -Method Post -ContentType 'application/json' -Body `$payload -UseBasicParsing | Out-Null
+    Write-Host 'Results sent to callback server' -ForegroundColor Green
+}
+catch {
+    Write-Host "Failed to send callback: `$(`$_.Exception.Message)" -ForegroundColor Yellow
+}
 "@
+# Persist the generated script for reference / offline transfer
+$vmScriptPath = Join-Path (Get-Location) "vm_auto_test.ps1"
+$vmScript | Out-File -FilePath $vmScriptPath -Encoding UTF8
 
-# Save script
-$vmScriptPath = ".\vm_auto_test.ps1"
-$vmScript | Out-File $vmScriptPath -Encoding UTF8
-
-Write-Host "[2/3] VM test script ready: $vmScriptPath" -ForegroundColor Green
+Write-Host "[2/4] VM test script written to: $vmScriptPath" -ForegroundColor Green
 Write-Host ""
-Write-Host "Copy this script to the VM and run it, OR run this one-liner on the VM:" -ForegroundColor Cyan
+Write-Host "To run on the VM, execute the following in an elevated PowerShell prompt:" -ForegroundColor Cyan
+Write-Host "  irm http://${localIP}:${CallbackPort}/script | iex" -ForegroundColor White
 Write-Host ""
-Write-Host "irm http://${localIP}:${CallbackPort}/script | iex" -ForegroundColor White
-Write-Host ""
-Write-Host "[3/3] Waiting for callback from VM..." -ForegroundColor Yellow
-Write-Host "Press Ctrl+C to stop listening" -ForegroundColor Gray
+Write-Host "[3/4] Waiting for VM to download script and post results..." -ForegroundColor Yellow
+Write-Host "Press Ctrl+C to stop the callback server after testing." -ForegroundColor Gray
 Write-Host ""
 
-# Handle requests
+function Send-Response {
+    param(
+        [System.Net.HttpListenerResponse]$Response,
+        [string]$Body,
+        [int]$StatusCode = 200,
+        [string]$ContentType = "text/plain"
+    )
+
+    $Response.StatusCode = $StatusCode
+    $Response.ContentType = $ContentType
+    $buffer = [System.Text.Encoding]::UTF8.GetBytes($Body)
+    $Response.ContentLength64 = $buffer.Length
+    $Response.OutputStream.Write($buffer, 0, $buffer.Length)
+    $Response.OutputStream.Close()
+}
+
 try {
     while ($listener.IsListening) {
         $context = $listener.GetContext()
         $request = $context.Request
         $response = $context.Response
+        $path = $request.Url.AbsolutePath.ToLowerInvariant()
+        $method = $request.HttpMethod.ToUpperInvariant()
 
-        if ($request.Url.PathAndQuery -eq "/script") {
-            # Serve the script
-            $buffer = [System.Text.Encoding]::UTF8.GetBytes($vmScript)
-            $response.ContentLength64 = $buffer.Length
-            $response.OutputStream.Write($buffer, 0, $buffer.Length)
-            $response.OutputStream.Close()
-
-            Write-Host "Script downloaded by VM" -ForegroundColor Cyan
+        if ($path -eq "/script" -and $method -eq "GET") {
+            Send-Response -Response $response -Body $vmScript -ContentType "text/plain"
+            Write-Host "[VM] Script downloaded (${($request.RemoteEndPoint)})" -ForegroundColor Cyan
+            continue
         }
-        elseif ($request.Url.PathAndQuery -eq "/result") {
-            # Receive results
-            $reader = New-Object System.IO.StreamReader($request.InputStream)
-            $results = $reader.ReadToEnd()
+
+        if ($path -eq "/result" -and $method -eq "POST") {
+            $reader = New-Object System.IO.StreamReader($request.InputStream, $request.ContentEncoding)
+            $payload = $reader.ReadToEnd()
             $reader.Close()
 
-            $response.StatusCode = 200
-            $response.OutputStream.Close()
+            Send-Response -Response $response -Body "OK" -ContentType "text/plain"
 
+            $timestamp = Get-Date -Format "yyyyMMdd_HHmmss"
+            $rawFile = Join-Path $ResultsDirectory "$timestamp-raw.json"
+            $payload | Out-File -FilePath $rawFile -Encoding UTF8
+
+            $parsed = $null
+            try {
+                $parsed = $payload | ConvertFrom-Json -Depth 10
+            }
+            catch {
+                Write-Host "[VM] Received callback but failed to parse JSON: $($_.Exception.Message)" -ForegroundColor Red
+                Write-Host $payload
+                Write-Host ""
+                continue
+            }
+
+            $results = $parsed.results
+            $reportText = $parsed.report
+            $hostName = Get-SafeFileName ($results.hostname)
+            $jsonFile = Join-Path $ResultsDirectory "$timestamp-$hostName.json"
+            $txtFile = Join-Path $ResultsDirectory "$timestamp-$hostName-report.txt"
+
+            $results | ConvertTo-Json -Depth 10 | Out-File -FilePath $jsonFile -Encoding UTF8
+            if ($reportText) {
+                $reportText | Out-File -FilePath $txtFile -Encoding UTF8
+            }
+
+            $tests = @()
+            if ($results.tests -is [System.Collections.IEnumerable]) {
+                $tests = @($results.tests)
+            }
+
+            $pass = ($tests | Where-Object { $_.success }).Count
+            $fail = ($tests | Where-Object { -not $_.success }).Count
+
+            Write-Host ""
             Write-Host "=== RESULTS RECEIVED FROM VM ===" -ForegroundColor Green
-            Write-Host $results -ForegroundColor White
+            Write-Host "Host:        $($results.hostname)" -ForegroundColor White
+            Write-Host "Timestamp:   $($results.timestamp)" -ForegroundColor White
+            Write-Host "Repo:        $($results.repo) [$($results.branch)]" -ForegroundColor White
+            Write-Host "Downloads:   $(($results.downloads | Measure-Object).Count) files" -ForegroundColor White
+            Write-Host "Tests:       $pass passed / $fail failed" -ForegroundColor White
+            Write-Host ""
+            if ($reportText) {
+                Write-Host $reportText -ForegroundColor Gray
+            }
+            Write-Host ""
+            Write-Host "Saved JSON:   $jsonFile" -ForegroundColor Gray
+            Write-Host "Saved report: $txtFile" -ForegroundColor Gray
             Write-Host "================================" -ForegroundColor Green
             Write-Host ""
-            Write-Host "Test complete! Press Ctrl+C to stop server." -ForegroundColor Cyan
-
-            # Optionally stop after receiving results
-            # break
+            continue
         }
+
+        Send-Response -Response $response -Body "Not Found" -StatusCode 404
     }
 }
 finally {
-    $listener.Stop()
+    if ($listener.IsListening) {
+        $listener.Stop()
+    }
     $listener.Close()
     Write-Host "`nCallback server stopped" -ForegroundColor Gray
 }

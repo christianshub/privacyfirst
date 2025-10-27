@@ -1,7 +1,7 @@
 # Fully automated test using Proxmox guest agent
 param(
     [string]$ProxmoxHost = "192.168.0.130",
-    [string]$ProxmoxPassword = "hellokityt123",
+    [string]$ProxmoxPassword = "hellokitty123",
     [string]$VMID = "102",
     [string]$GitHubUser = "christianshub",
     [string]$RepoName = "privacyfirst"

@@ -62,6 +62,38 @@ cd c:\repos\privacyfirst\tests
 # Then RDP to VM and test manually
 ```
 
+### Callback-Based VM Testing:
+```powershell
+# 1. On the dev machine, start the callback server
+cd c:\repos\privacyfirst
+.\auto_test_with_callback.ps1 -CallbackPort 9000
+
+# 2. On the VM (elevated PowerShell), download and execute the scripted test
+irm http://DEV-IP:9000/script | iex
+```
+
+The host console will show download progress, save detailed results under `callback_results\`, and print a test summary once the VM posts back.
+
+### Fully Automated Proxmox Run:
+```powershell
+# From the repo root, orchestrate rollback → callback → guest exec
+cd c:\repos\privacyfirst
+.\tests\proxmox_callback_orchestrator.ps1 `
+    -ProxmoxHost 192.168.0.130 `
+    -ProxmoxUser root@pam `
+    -ProxmoxPassword 'hellokitty123' `
+    -VMID 102 `
+    -SnapshotName baseline `
+    -CallbackPort 9900 `
+    -UseWinRM `
+    -VMIPAddress 192.168.0.143 `
+    -VMUser john `
+    -VMPassword '1' `
+    -ShutdownVM
+```
+
+This script uses the Proxmox API to roll the VM back to the specified snapshot, start it, host the callback server, execute the VM auto-test (via the QEMU guest agent when available, or WinRM when `-UseWinRM` and credentials are supplied), wait for `callback_results\` to populate, and optionally shut the VM down.
+
 ### Rollback VM:
 ```bash
 ssh root@192.168.0.130 "qm shutdown 102 && qm rollback 102 baseline && qm start 102"
