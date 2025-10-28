@@ -43,6 +43,14 @@ dotnet build ui/PrivacyFirst.UI/PrivacyFirst.UI.csproj -c Release
 msbuild PrivacyFirst.sln /p:Configuration=Release /p:Platform=x64
 ```
 
+### Build Installer (self-contained + Inno Setup)
+```powershell
+pwsh scripts/build_installer.ps1 -Configuration Release -Version 1.0.0
+```
+Outputs:
+- Self-contained publish: `publish\win-x64\PrivacyFirst.exe`
+- Installer: `dist\PrivacyFirst-Setup.exe` (requires Inno Setup 6)
+
 ## Testing on Proxmox
 
 ### Prerequisites:
