@@ -180,6 +180,14 @@ Settings stored in: `HKLM\SOFTWARE\PrivacyFirst\Settings\`
 - [ ] Application icon
 - [ ] Installer
 
+## Remote Automation TODO
+
+- `tests/proxmox_ssh_runner.py` now deploys artifacts, runs the Windows-side helper, and auto-shuts the VM, but the run still stalls right after “Launching remote executable …” because the helper never returns.
+- Add retrieval of `runner_launcher.log`, `runner_stdout.txt`, and `runner_stderr.txt` from the VM after each run to understand the install/launch behavior.
+- Confirm the VM has the .NET 8 Desktop runtime (or publish PrivacyFirst as a self-contained build) so `PrivacyFirst.exe` no longer fails with hostfxr errors.
+- Decide whether the WPF app should exit on its own or if we need a CLI harness/detach mode for headless pipelines.
+- Once logs clarify the failure, refine `tests/install_and_run.ps1` to handle UI prompts, timeout gracefully, and surface structured results back to the runner.
+
 ## Security Note
 
 ⚠️ **WARNING**: This tool makes system-level changes. Always:

@@ -283,6 +283,7 @@ $result | ConvertTo-Json -Depth 5
 """
     encoded = base64.b64encode(ps_script.encode("utf-16le")).decode("ascii")
     command = f"powershell.exe -NoLogo -NoProfile -ExecutionPolicy Bypass -EncodedCommand {encoded}"
+
     stdin, stdout, stderr = ssh_client.exec_command(command)
     out = stdout.read().decode(errors="ignore").strip()
     err = stderr.read().decode(errors="ignore").strip()
