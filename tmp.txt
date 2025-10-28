@@ -1,0 +1,461 @@
+# Proxmox automation pipeline:
+#  1. Roll back VM snapshot (optional)
+#  2. Boot VM 102 and wait for QEMU guest agent
+#  3. Serve local build artifacts over HTTP
+#  4. Download & execute program inside the VM via the guest agent
+#  5. Collect stdout/exit code and optionally shut the VM down
+param(
+    [string]$ProxmoxHost = "192.168.0.130",
+    [string]$ProxmoxUser = "root@pam",
+    [string]$ProxmoxPassword = "",
+    [string]$NodeName = "",
+    [string]$VMID = "102",
+    [string]$SnapshotName = "baseline",
+    [string]$BuildOutputPath = "c:\repos\privacyfirst\x64\Release",
+    [string[]]$Files = @(
+        "PrivacyFirst.exe",
+        "PrivacyFirst.dll",
+        "PrivacyCore.dll",
+        "PrivacyFirst.deps.json",
+        "PrivacyFirst.runtimeconfig.json"
+    ),
+    [string]$Executable = "PrivacyFirst.exe",
+    [string]$Arguments = "",
+    [string]$RemoteWorkingDirectory = "C:\PrivacyFirstPipeline",
+    [int]$HttpPort = 9910,
+    [switch]$SkipSnapshot,
+    [switch]$ShutdownVM
+)
+
+$ErrorActionPreference = "Stop"
+
+function Write-Section([string]$text, [ConsoleColor]$color = [ConsoleColor]::Cyan) {
+    Write-Host ""
+    Write-Host $text -ForegroundColor $color
+}
+
+function Get-LocalLanIp {
+    $ip = Get-NetIPAddress -AddressFamily IPv4 |
+        Where-Object {
+            $_.IPAddress -like "192.168.*" -or
+            $_.IPAddress -like "10.*" -or
+            $_.IPAddress -like "172.16.*"
+        } |
+        Select-Object -First 1 -ExpandProperty IPAddress
+
+    if (-not $ip) {
+        throw "Unable to determine LAN IPv4 address. Ensure you are on the same network as the Proxmox host."
+    }
+
+    return $ip
+}
+
+function Initialize-ProxmoxApi {
+    param(
+        [string]$PveHost,
+        [string]$PveUser,
+        [string]$PvePassword
+    )
+
+    if (-not ([System.Management.Automation.PSTypeName]'TrustAllCertsPolicy').Type) {
+        Add-Type @"
+using System.Net;
+using System.Security.Cryptography.X509Certificates;
+public class TrustAllCertsPolicy : ICertificatePolicy {
+    public bool CheckValidationResult(
+        ServicePoint srvPoint,
+        X509Certificate certificate,
+        WebRequest request,
+        int certificateProblem) {
+        return true;
+    }
+}
+"@
+        [System.Net.ServicePointManager]::CertificatePolicy = New-Object TrustAllCertsPolicy
+    }
+
+    [System.Net.ServicePointManager]::SecurityProtocol = [System.Net.SecurityProtocolType]::Tls12
+
+    Write-Host ("Authenticating to Proxmox at {0}" -f $PveHost) -ForegroundColor DarkGray
+
+    $session = New-Object Microsoft.PowerShell.Commands.WebRequestSession
+    $authUri = "https://${PveHost}:8006/api2/json/access/ticket"
+    $response = Invoke-RestMethod -Method Post -Uri $authUri -Body @{
+        username = $PveUser
+        password = $PvePassword
+    } -WebSession $session
+
+    return @{
+        Ticket = $response.data.ticket
+        CSRF   = $response.data.CSRFPreventionToken
+        Session = $session
+    }
+}
+
+function Invoke-ProxmoxRequest {
+    param(
+        [string]$Method,
+        [string]$Path,
+        [hashtable]$Body = $null
+    )
+
+    $uri = "https://${script:ProxmoxHost}:8006/api2/json$Path"
+
+    $headers = @{}
+
+    if ($Method -ne "GET") {
+        $headers.CSRFPreventionToken = $script:ProxmoxCSRF
+    }
+
+    $params = @{
+        Method      = $Method
+        Uri         = $uri
+        WebSession  = $script:ProxmoxSession
+        ErrorAction = 'Stop'
+    }
+
+    if ($headers.Count -gt 0) {
+        $params.Headers = $headers
+    }
+
+    if ($Body) {
+        $params.ContentType = "application/json"
+        $params.Body = $Body | ConvertTo-Json -Depth 10
+    }
+
+    Invoke-RestMethod @params
+}
+
+function Wait-ForGuestAgent {
+    param(
+        [string]$Node,
+        [string]$VMID,
+        [int]$Attempts = 30,
+        [int]$DelaySeconds = 5
+    )
+
+    for ($i = 0; $i -lt $Attempts; $i++) {
+        try {
+            Invoke-ProxmoxRequest -Method Post -Path "/nodes/$Node/qemu/$VMID/agent/ping" | Out-Null
+            return $true
+        }
+        catch {
+            Start-Sleep -Seconds $DelaySeconds
+        }
+    }
+
+    return $false
+}
+
+# Prompt for Proxmox password if omitted
+if (-not $ProxmoxPassword) {
+    $ProxmoxPassword = Read-Host -Prompt "Enter Proxmox password for $ProxmoxUser" -AsSecureString
+    $ptr = [Runtime.InteropServices.Marshal]::SecureStringToBSTR($ProxmoxPassword)
+    try {
+        $ProxmoxPassword = [Runtime.InteropServices.Marshal]::PtrToStringUni($ptr)
+    }
+    finally {
+        [Runtime.InteropServices.Marshal]::ZeroFreeBSTR($ptr)
+    }
+}
+
+if (-not (Test-Path $BuildOutputPath)) {
+    throw "Build output path not found: $BuildOutputPath"
+}
+
+$script:ProxmoxHost = $ProxmoxHost
+
+Write-Host "=== PrivacyFirst Proxmox Program Runner ===" -ForegroundColor Cyan
+Write-Host "Proxmox:  $ProxmoxHost" -ForegroundColor Gray
+Write-Host "VM ID:    $VMID" -ForegroundColor Gray
+Write-Host "Snapshot: $SnapshotName" -ForegroundColor Gray
+Write-Host "Artifacts: $BuildOutputPath" -ForegroundColor Gray
+Write-Host "Executable: $Executable $Arguments" -ForegroundColor Gray
+
+# Authenticate & resolve node
+Write-Section "[1/8] Authenticating with Proxmox..."
+$authTokens = Initialize-ProxmoxApi -PveHost $ProxmoxHost -PveUser $ProxmoxUser -PvePassword $ProxmoxPassword
+$script:ProxmoxTicket = $authTokens.Ticket
+$script:ProxmoxCSRF = $authTokens.CSRF
+
+if ([string]::IsNullOrWhiteSpace($NodeName)) {
+    $nodeResponse = Invoke-ProxmoxRequest -Method Get -Path "/nodes"
+    $NodeName = $nodeResponse.data[0].node
+    Write-Host "Detected node: $NodeName" -ForegroundColor Gray
+}
+else {
+    Write-Host "Using node: $NodeName" -ForegroundColor Gray
+}
+
+# Optional snapshot rollback
+if (-not $SkipSnapshot) {
+    Write-Section "[2/8] Rolling back snapshot '$SnapshotName'..."
+    try {
+        Invoke-ProxmoxRequest -Method Post -Path "/nodes/$NodeName/qemu/$VMID/snapshot/$SnapshotName/rollback" | Out-Null
+        Write-Host "Snapshot rollback queued" -ForegroundColor Green
+    }
+    catch {
+        Write-Host "Snapshot rollback failed: $($_.Exception.Message)" -ForegroundColor Yellow
+    }
+}
+else {
+    Write-Section "[2/8] Skipping snapshot rollback (--SkipSnapshot)"
+}
+
+# Start VM if needed
+Write-Section "[3/8] Ensuring VM is running..."
+$vmStatus = (Invoke-ProxmoxRequest -Method Get -Path "/nodes/$NodeName/qemu/$VMID/status/current").data.status
+if ($vmStatus -ne "running") {
+    Invoke-ProxmoxRequest -Method Post -Path "/nodes/$NodeName/qemu/$VMID/status/start" | Out-Null
+    Write-Host "VM start requested, waiting for boot..." -ForegroundColor Yellow
+    Start-Sleep -Seconds 30
+}
+else {
+    Write-Host "VM already running" -ForegroundColor Green
+}
+
+# Confirm running state
+for ($i = 0; $i -lt 12; $i++) {
+    $vmStatus = (Invoke-ProxmoxRequest -Method Get -Path "/nodes/$NodeName/qemu/$VMID/status/current").data.status
+    if ($vmStatus -eq "running") { break }
+    Start-Sleep -Seconds 5
+}
+
+if ($vmStatus -ne "running") {
+    throw "VM failed to reach running state."
+}
+
+# Wait for QEMU guest agent
+Write-Section "[4/8] Waiting for QEMU guest agent..."
+if (-not (Wait-ForGuestAgent -Node $NodeName -VMID $VMID)) {
+    throw "Guest agent not responding. Ensure qemu-guest-agent service is running inside the VM."
+}
+Write-Host "Guest agent is responsive" -ForegroundColor Green
+
+# Start HTTP server to serve artifacts
+Write-Section "[5/8] Starting local HTTP artifact server..."
+$localIP = Get-LocalLanIp
+
+$serveJob = Start-Job -ScriptBlock {
+    param($path, $port, $bind)
+    Set-Location $path
+    python -m http.server $port --bind $bind
+} -ArgumentList $BuildOutputPath, $HttpPort, $localIP
+
+Start-Sleep -Seconds 2
+
+$httpReady = $false
+$probeUri = ("http://{0}:{1}/" -f $localIP, $HttpPort)
+for ($i = 0; $i -lt 10; $i++) {
+    if ($serveJob.State -eq "Failed") {
+        $err = Receive-Job -Job $serveJob -ErrorAction SilentlyContinue
+        throw "Artifact server failed to start: $err"
+    }
+
+    try {
+        Invoke-WebRequest -Uri $probeUri -Method Get -UseBasicParsing | Out-Null
+        $httpReady = $true
+        break
+    }
+    catch {
+        Start-Sleep -Seconds 1
+    }
+}
+
+if (-not $httpReady) {
+    Stop-Job -Job $serveJob -Force | Out-Null
+    Remove-Job -Job $serveJob | Out-Null
+    throw "Artifact server not reachable on $probeUri"
+}
+
+Write-Host ("Serving {0} at {1}" -f $BuildOutputPath, $probeUri) -ForegroundColor Green
+
+# Construct VM-side script
+$config = @{
+    BaseUrl      = ("http://{0}:{1}" -f $localIP, $HttpPort)
+    Destination  = $RemoteWorkingDirectory
+    Files        = $Files
+    Executable   = $Executable
+    Arguments    = $Arguments
+    StdOutFile   = "stdout.txt"
+    StdErrFile   = "stderr.txt"
+}
+
+$configJson = $config | ConvertTo-Json -Depth 10
+$configBase64 = [Convert]::ToBase64String([System.Text.Encoding]::UTF8.GetBytes($configJson))
+
+$vmScript = @"
+`$cfgJson = [System.Text.Encoding]::UTF8.GetString([Convert]::FromBase64String("$configBase64"))
+`$cfg = `$cfgJson | ConvertFrom-Json
+
+`$ErrorActionPreference = 'Stop'
+
+if (-not (Test-Path `$cfg.Destination)) {
+    New-Item -ItemType Directory -Path `$cfg.Destination -Force | Out-Null
+}
+
+foreach (`$file in `$cfg.Files) {
+    `$uri = "`$(`$cfg.BaseUrl)/`$file"
+    Invoke-WebRequest -Uri `$uri -OutFile (Join-Path `$cfg.Destination `$file) -UseBasicParsing -ErrorAction Stop
+}
+
+`$exePath = Join-Path `$cfg.Destination `$cfg.Executable
+if (-not (Test-Path `$exePath)) {
+    throw "Executable not found: `$exePath"
+}
+
+`$stdoutPath = Join-Path `$cfg.Destination `$cfg.StdOutFile
+`$stderrPath = Join-Path `$cfg.Destination `$cfg.StdErrFile
+
+if (Test-Path `$stdoutPath) { Remove-Item `$stdoutPath -Force }
+if (Test-Path `$stderrPath) { Remove-Item `$stderrPath -Force }
+
+`$startInfo = @{
+    FilePath = `$exePath
+    PassThru = `$true
+    Wait = `$true
+    NoNewWindow = `$true
+    RedirectStandardOutput = `$stdoutPath
+    RedirectStandardError = `$stderrPath
+}
+
+if (-not [string]::IsNullOrWhiteSpace(`$cfg.Arguments)) {
+    `$startInfo.ArgumentList = `$cfg.Arguments
+}
+
+`$proc = Start-Process @startInfo
+
+`$stdout = if (Test-Path `$stdoutPath) { Get-Content `$stdoutPath -Raw } else { "" }
+`$stderr = if (Test-Path `$stderrPath) { Get-Content `$stderrPath -Raw } else { "" }
+
+[PSCustomObject]@{
+    StdOut = `$stdout
+    StdErr = `$stderr
+    ExitCode = `$proc.ExitCode
+    Executable = `$exePath
+    Arguments = `$cfg.Arguments
+} | ConvertTo-Json -Depth 5
+"@
+
+$vmScriptEncoded = [Convert]::ToBase64String([System.Text.Encoding]::Unicode.GetBytes($vmScript))
+
+# Execute script through guest agent
+Write-Section "[6/8] Executing program inside VM..."
+$execBody = @{
+    command = "powershell.exe"
+    args    = @(
+        "-NoLogo",
+        "-NoProfile",
+        "-ExecutionPolicy", "Bypass",
+        "-EncodedCommand", $vmScriptEncoded
+    )
+}
+
+$execResponse = Invoke-ProxmoxRequest -Method Post -Path "/nodes/$NodeName/qemu/$VMID/agent/exec" -Body $execBody
+$execPid = $execResponse.data.pid
+Write-Host "Guest exec PID: $execPid" -ForegroundColor Gray
+
+# Poll for completion and capture output
+Write-Section "[7/8] Waiting for execution result..."
+$resultJson = $null
+$exitCode = $null
+$stdOut = ""
+$stdErr = ""
+
+for ($i = 0; $i -lt 60; $i++) {
+    $status = Invoke-ProxmoxRequest -Method Get -Path "/nodes/$NodeName/qemu/$VMID/agent/exec-status?pid=$execPid"
+    if ($status.data.exited -eq $true) {
+        $exitCode = $status.data.exitcode
+
+        if ($status.data."out-data") {
+            $stdOut = [System.Text.Encoding]::UTF8.GetString([Convert]::FromBase64String($status.data."out-data"))
+        }
+        if ($status.data."err-data") {
+            $stdErr = [System.Text.Encoding]::UTF8.GetString([Convert]::FromBase64String($status.data."err-data"))
+        }
+
+        break
+    }
+
+    Start-Sleep -Seconds 3
+}
+
+if ($serveJob) {
+    Stop-Job -Job $serveJob -Force -ErrorAction SilentlyContinue | Out-Null
+    Remove-Job -Job $serveJob -ErrorAction SilentlyContinue
+}
+
+if (-not $exitCode) {
+    Write-Host "Warning: exec-status did not report completion within timeout." -ForegroundColor Yellow
+}
+else {
+    Write-Host "Exit code: $exitCode" -ForegroundColor Gray
+}
+
+if ($stdOut) {
+    try {
+        $resultJson = $stdOut | ConvertFrom-Json -ErrorAction Stop
+    }
+    catch {
+        Write-Host "STDOUT (non-JSON):" -ForegroundColor Yellow
+        Write-Host $stdOut -ForegroundColor DarkGray
+    }
+}
+
+if ($stdErr) {
+    Write-Host "STDERR:" -ForegroundColor Yellow
+    Write-Host $stdErr -ForegroundColor DarkGray
+}
+
+# Optional shutdown
+if ($ShutdownVM) {
+    Write-Section "[8/8] Shutting down VM..."
+    try {
+        Invoke-ProxmoxRequest -Method Post -Path "/nodes/$NodeName/qemu/$VMID/status/shutdown" | Out-Null
+        Write-Host "Shutdown requested" -ForegroundColor Green
+    }
+    catch {
+        Write-Host "Failed to shut down VM: $($_.Exception.Message)" -ForegroundColor Yellow
+    }
+}
+else {
+    Write-Section "[8/8] Leaving VM running (use -ShutdownVM to stop automatically)."
+}
+
+Write-Section "=== Execution Summary ===" ([ConsoleColor]::Cyan)
+Write-Host "Executable: $Executable" -ForegroundColor Gray
+Write-Host "Arguments:  $Arguments" -ForegroundColor Gray
+$resolvedExit = if ($resultJson -and $resultJson.PSObject.Properties.Name -contains "ExitCode") {
+    $resultJson.ExitCode
+}
+elseif ($exitCode -ne $null) {
+    $exitCode
+}
+else {
+    "unknown"
+}
+Write-Host ("Exit code:  {0}" -f $resolvedExit) -ForegroundColor Gray
+
+if ($resultJson -and $resultJson.StdOut) {
+    Write-Host "`nCaptured STDOUT:" -ForegroundColor White
+    Write-Host $resultJson.StdOut -ForegroundColor DarkGray
+}
+
+if ($resultJson -and $resultJson.StdErr) {
+    Write-Host "`nCaptured STDERR:" -ForegroundColor Yellow
+    Write-Host $resultJson.StdErr -ForegroundColor DarkGray
+}
+
+Write-Host "`nPipeline complete." -ForegroundColor Green
+
+if ($resultJson) {
+    return $resultJson
+}
+
+return [PSCustomObject]@{
+    StdOut     = $stdOut
+    StdErr     = $stdErr
+    ExitCode   = $exitCode
+    Executable = $Executable
+    Arguments  = $Arguments
+}

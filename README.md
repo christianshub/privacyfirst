@@ -94,6 +94,23 @@ cd c:\repos\privacyfirst
 
 This script uses the Proxmox API to roll the VM back to the specified snapshot, start it, host the callback server, execute the VM auto-test (via the QEMU guest agent when available, or WinRM when `-UseWinRM` and credentials are supplied), wait for `callback_results\` to populate, and optionally shut the VM down.
 
+### Program Runner Pipeline (Guest Agent):
+```powershell
+cd c:\repos\privacyfirst
+.\tests\proxmox_program_runner.ps1 `
+    -ProxmoxHost 192.168.0.130 `
+    -ProxmoxUser root@pam `
+    -ProxmoxPassword 'hellokitty123' `
+    -VMID 102 `
+    -SnapshotName baseline `
+    -BuildOutputPath .\x64\Release `
+    -Executable PrivacyFirst.exe `
+    -Arguments '' `
+    -ShutdownVM
+```
+
+This pipeline uses the QEMU guest agent to roll back VM 102, serve the local Release binaries via HTTP, download & execute them inside the VM, capture stdout/exit code, and shut the VM down when complete. Adjust `Files`, `Executable`, and `Arguments` as needed for different binaries.
+
 ### Rollback VM:
 ```bash
 ssh root@192.168.0.130 "qm shutdown 102 && qm rollback 102 baseline && qm start 102"
